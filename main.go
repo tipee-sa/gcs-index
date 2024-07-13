@@ -5,9 +5,11 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,7 +34,12 @@ var mountPoints []MountPoint
 //go:embed page.html
 var pageHtml []byte
 
+var port = flag.Int("port", 8080, "port to listen on")
+var socket = flag.String("socket", "", "socket to listen on")
+
 func main() {
+	flag.Parse()
+
 	prepareMountPoints()
 	slog.Info("initializing", "mountPoints", mountPoints)
 
@@ -40,17 +47,29 @@ func main() {
 	client, err = storage.NewClient(context.Background(), storage.WithJSONReads())
 	if err != nil {
 		slog.Error("failed to create storage client", "err", err)
+		os.Exit(4)
+	}
+
+	server := &http.Server{}
+	http.HandleFunc("/", handle)
+
+	var listener net.Listener
+	if *socket != "" {
+		slog.Info("listening on socket", "socket", *socket)
+		listener, err = net.Listen("unix", *socket)
+	} else {
+		slog.Info("listening on port", "port", *port)
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	}
+	if err != nil {
+		slog.Error("failed to listen", "err", err)
 		os.Exit(3)
 	}
 
-	server := &http.Server{Addr: fmt.Sprintf(":%s", envOr("PORT", "8080"))}
-	http.HandleFunc("/", handle)
-
 	go func() {
-		slog.Info("server started", "addr", server.Addr)
-		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "err", err)
-			os.Exit(4)
+			os.Exit(5)
 		}
 		slog.Warn("server stopped")
 	}()
@@ -67,26 +86,19 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "err", err)
-		os.Exit(5)
+		os.Exit(6)
 	}
 	slog.Info("shutdown completed")
 }
 
-func envOr(key, defaultValue string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	} else {
-		return defaultValue
-	}
-}
-
 func prepareMountPoints() {
-	if len(os.Args) < 2 {
+	args := flag.Args()
+	if len(args) < 1 {
 		fmt.Fprintf(os.Stderr, "Usage: %s path:bucket:prefix [path:bucket:prefix ...]\n", os.Args[0])
 		os.Exit(1)
 	}
 
-	for _, arg := range os.Args[1:] {
+	for _, arg := range args {
 		mountPointParts := strings.SplitN(arg, ":", 3)
 		if len(mountPointParts) != 3 {
 			slog.Error("invalid mount point", "arg", arg, "reason", "expected 'path:bucket:prefix'")
