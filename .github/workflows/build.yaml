@@ -1,0 +1,41 @@
+name: Build & Push
+
+on:
+  push:
+    tags:
+      - "*"
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
+
+    - run: go test -v ./...
+
+    - run: go build -ldflags '-s' ./...
+      env:
+        CGO_ENABLED: 0
+
+    - name: Log in to registry
+      if: github.event_name == 'push'
+      run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
+
+    - name: Build image
+      if: github.event_name == 'push'
+      run: docker build . -t ghcr.io/tipee-sa/gcs-index:$(echo "${{ github.ref }}" | cut -d/ -f3-)
+
+    - name: Push image
+      if: github.event_name == 'push'
+      run: docker push ghcr.io/tipee-sa/gcs-index:$(echo "${{ github.ref }}" | cut -d/ -f3-)
