@@ -36,9 +36,15 @@ var pageHtml []byte
 
 var port = flag.Int("port", 8080, "port to listen on")
 var socket = flag.String("socket", "", "socket to listen on")
+var socketUmask = flag.Int("socket-umask", -1, "umask for the socket file")
+var verbose = flag.Bool("v", false, "enable verbose logging")
 
 func main() {
 	flag.Parse()
+
+	if *verbose {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
 
 	prepareMountPoints()
 	slog.Info("initializing", "mountPoints", mountPoints)
@@ -55,8 +61,16 @@ func main() {
 
 	var listener net.Listener
 	if *socket != "" {
+		var oldUmask = -1
+		if *socketUmask >= 0 {
+			slog.Info("setting umask", "umask", *socketUmask)
+			oldUmask = syscall.Umask(*socketUmask)
+		}
 		slog.Info("listening on socket", "socket", *socket)
 		listener, err = net.Listen("unix", *socket)
+		if oldUmask >= 0 {
+			syscall.Umask(oldUmask)
+		}
 	} else {
 		slog.Info("listening on port", "port", *port)
 		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", *port))
@@ -229,7 +243,7 @@ func linksFromStorage(ctx context.Context, path string) (links []string) {
 }
 
 func findMountPoint(path string) *MountPoint {
-	for i := len(mountPoints) - 1; i >= 0; i-- {
+	for i := 0; i < len(mountPoints); i++ {
 		if strings.HasPrefix(path, mountPoints[i].Path) {
 			return &mountPoints[i]
 		}
