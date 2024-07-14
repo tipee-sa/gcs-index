@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,7 +16,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"google.golang.org/api/iterator"
 )
 
 type MountPoint struct {
@@ -28,16 +24,18 @@ type MountPoint struct {
 	Prefix string
 }
 
+const defaultCacheControl = "public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400"
+
 var client *storage.Client
 var mountPoints []MountPoint
 
-//go:embed page.html
-var pageHtml []byte
-
 var port = flag.Int("port", 8080, "port to listen on")
+var readme = flag.Bool("readme", false, "enable README.md rendering")
+var skipReadme = flag.Bool("skip-readme", false, "skip README.md in directory listings")
 var socket = flag.String("socket", "", "socket to listen on")
 var socketUmask = flag.Int("socket-umask", -1, "umask for the socket file")
 var verbose = flag.Bool("v", false, "enable verbose logging")
+var versionSort = flag.Bool("version-sort", false, "sort directory listings using a semver-aware algorithm")
 
 func main() {
 	flag.Parse()
@@ -134,6 +132,7 @@ func prepareMountPoints() {
 		})
 	}
 
+	// Longest path first
 	slices.SortFunc(mountPoints, func(a, b MountPoint) int {
 		if len(a.Path) != len(b.Path) {
 			return len(b.Path) - len(a.Path)
@@ -144,21 +143,11 @@ func prepareMountPoints() {
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
-	slog.Info("request",
-		"path", r.URL.Path,
-		"method", r.Method,
-		"remote", r.RemoteAddr,
-		"forwarded-for", r.Header.Get("X-Forwarded-For"),
-		"user-agent", r.UserAgent())
+	slog.Info("request", "path", r.URL.Path, "method", r.Method)
 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		slog.Warn("method not allowed", "method", r.Method)
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	if r.URL.Path == "/favicon.ico" {
-		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -169,79 +158,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodHead {
-		// Directory index always returns 200 OK.
-		return
-	}
-
-	var links []string
-	if r.URL.Path != "/" {
-		links = append(links, "../")
-	}
-
-	links = append(links, linksFromMountPoints(r.URL.Path)...)
-	links = append(links, linksFromStorage(r.Context(), r.URL.Path)...)
-
-	links = slices.Compact(links)
-	slices.Sort(links)
-
-	var output bytes.Buffer
-	for _, link := range links {
-		_, _ = output.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>\n", link, link))
-	}
-
-	w.Write(pageHtml)
-	w.Write(output.Bytes())
-}
-
-func linksFromMountPoints(path string) (links []string) {
-	for _, mountPoint := range mountPoints {
-		if mountPoint.Path != path && strings.HasPrefix(mountPoint.Path, path) {
-			links = append(links, strings.SplitAfterN(strings.TrimPrefix(mountPoint.Path, path), "/", 2)[0])
-		}
-	}
-	return
-}
-
-func linksFromStorage(ctx context.Context, path string) (links []string) {
-	var mountPoint = findMountPoint(path)
-	if mountPoint == nil {
-		return
-	}
-
-	bucket := client.Bucket(mountPoint.Bucket)
-	query := &storage.Query{
-		Prefix:    mountPoint.Prefix + strings.TrimPrefix(path, mountPoint.Path),
-		Delimiter: "/",
-	}
-
-	slog.Debug("listing objects", "bucket", mountPoint.Bucket, "query", query)
-
-	objects := bucket.Objects(ctx, query)
-	for {
-		attrs, err := objects.Next()
-		if err == iterator.Done {
-			break
-		} else if err != nil {
-			slog.Error("failed to list objects", "err", err)
-			break
-		}
-
-		if attrs.Name != "" {
-			if attrs.Name != query.Prefix {
-				links = append(links, strings.TrimPrefix(attrs.Name, query.Prefix))
-			}
-		} else if attrs.Prefix != "" {
-			links = append(links, strings.TrimPrefix(attrs.Prefix, query.Prefix))
-		} else {
-			slog.Warn("unexpected object", "attrs", attrs)
-		}
-	}
-
-	return
-}
-
 func findMountPoint(path string) *MountPoint {
 	for i := 0; i < len(mountPoints); i++ {
 		if strings.HasPrefix(path, mountPoints[i].Path) {
@@ -249,47 +165,4 @@ func findMountPoint(path string) *MountPoint {
 		}
 	}
 	return nil
-}
-
-func handleObject(w http.ResponseWriter, r *http.Request) {
-	var mountPoint = findMountPoint(r.URL.Path)
-	if mountPoint == nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	bucket := client.Bucket(mountPoint.Bucket)
-	obj := bucket.Object(mountPoint.Prefix + strings.TrimPrefix(r.URL.Path, mountPoint.Path))
-
-	reader, err := obj.NewReader(r.Context())
-	if err != nil {
-		slog.Error("failed to read object",
-			"bucket", obj.BucketName(),
-			"object", obj.ObjectName(),
-			"err", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	defer reader.Close()
-
-	setHeaderIfNotEmpty(w, "Content-Length", fmt.Sprintf("%d", reader.Attrs.Size))
-	setHeaderIfNotEmpty(w, "Content-Type", reader.Attrs.ContentType)
-	setHeaderIfNotEmpty(w, "Content-Encoding", reader.Attrs.ContentEncoding)
-	setHeaderIfNotEmpty(w, "Last-Modified", reader.Attrs.LastModified.Format(http.TimeFormat))
-	setHeaderIfNotEmpty(w, "Cache-Control", reader.Attrs.CacheControl)
-
-	if r.Method == http.MethodHead {
-		return
-	}
-
-	if _, err := io.Copy(w, reader); err != nil {
-		slog.Error("failed to write object", "err", err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}
-}
-
-func setHeaderIfNotEmpty(w http.ResponseWriter, key, value string) {
-	if value != "" {
-		w.Header().Set(key, value)
-	}
 }
