@@ -36,10 +36,10 @@ http {
   }
 
   server {
-    proxy_cache static;
-    proxy_cache_use_stale  error timeout invalid_header updating;
-    proxy_cache_revalidate  on;
-    proxy_cache_valid  200 404 1m;
+    proxy_cache                    static;
+    proxy_cache_use_stale          error timeout;
+    proxy_cache_revalidate         on;
+    proxy_cache_valid              200 404 1m;
     proxy_cache_background_update  on;
 
     location / {

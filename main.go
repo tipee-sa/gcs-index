@@ -24,7 +24,7 @@ type MountPoint struct {
 	Prefix string
 }
 
-const defaultCacheControl = "public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400"
+const defaultCacheControl = "public, max-age=60, must-revalidate"
 
 var client *storage.Client
 var mountPoints []MountPoint
