@@ -2,7 +2,7 @@
 
 Provide auto-index in front of Google Cloud Storage buckets.
 
-Intended to be used together with a caching proxy.
+Plays well with a caching proxy in front. 😉
 
 ## Usage
 
@@ -24,3 +24,27 @@ For each bucket:
   - `-skip-readme`: skip README.md in directory listings
   - `-version-sort`: sort directory listings using a semver-aware algorithm
   - `-v`: enable verbose logging
+
+## Example nginx caching proxy configuration
+
+```
+http {
+  proxy_cache_path  /var/cache/nginx keys_zone=static:10m max_size=1g inactive=1w;
+
+  upstream gcs-index {
+    server  unix:/path/to/gcs-index.sock;
+  }
+
+  server {
+    proxy_cache static;
+    proxy_cache_use_stale  error timeout invalid_header updating;
+    proxy_cache_revalidate  on;
+    proxy_cache_valid  200 404 1m;
+    proxy_cache_background_update  on;
+
+    location / {
+      proxy_pass http://gcs-index;
+    }
+  }
+}
+```
