@@ -41,8 +41,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	var storageLinks, readmeObject = linksFromStorage(r.Context(), r.URL.Path)
 	links = append(links, storageLinks...)
 
-	links = slices.Compact(links)
 	slices.SortStableFunc(links, sortLinks)
+	links = slices.CompactFunc(links, func(a Link, b Link) bool {
+		return a.Target == b.Target
+	})
 
 	var output = bufio.NewWriter(w)
 
