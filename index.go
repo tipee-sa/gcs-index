@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,9 +17,13 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-type Link struct {
-	Target string
-	Extra  string
+type Item struct {
+	Name        string            `json:"name"`
+	Size        *uint64           `json:"size,omitempty"`
+	Fingerprint *string           `json:"fingerprint,omitempty"`
+	ContentType *string           `json:"content_type,omitempty"`
+	Updated     *time.Time        `json:"updated,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 //go:embed page.html
@@ -28,63 +33,89 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Last-Modified", time.Now().Truncate(time.Minute).Format(http.TimeFormat)) // Listing shows relative timestamps.
 	w.Header().Set("Cache-Control", defaultCacheControl)
+	w.Header().Set("Vary", "Accept")
 
 	if r.Method == http.MethodHead {
 		// Directory index always returns 200 OK.
 		return
 	}
 
-	var links []Link
+	var jsonOutput = r.Header.Get("Accept") == "application/json" || r.URL.Query().Get("format") == "json"
+	if jsonOutput {
+		w.Header().Set("Content-Type", "application/json")
+	}
 
-	links = append(links, linksFromMountPoints(r.URL.Path)...)
+	var items = make([]Item, 0)
+
+	items = append(items, linksFromMountPoints(r.URL.Path)...)
 
 	var storageLinks, readmeObject = linksFromStorage(r.Context(), r.URL.Path)
-	links = append(links, storageLinks...)
+	items = append(items, storageLinks...)
 
-	slices.SortStableFunc(links, sortLinks)
-	links = slices.CompactFunc(links, func(a Link, b Link) bool {
-		return a.Target == b.Target
+	slices.SortStableFunc(items, sortLinks)
+	items = slices.CompactFunc(items, func(a Item, b Item) bool {
+		return a.Name == b.Name
 	})
 
 	var output = bufio.NewWriter(w)
 
-	output.Write(pageHtml)
-	output.WriteString("<main><table>\n")
-	if r.URL.Path != "/" {
-		output.WriteString("<tr><td><a href=\"../\">../</a></td></tr>\n")
-	}
-	for i, link := range links {
-		// Split links with and without extra information into separate tables.
-		if i > 0 && links[i-1].Extra != "" && link.Extra == "" {
-			output.WriteString("</table><table>\n")
+	if jsonOutput {
+		json.NewEncoder(output).Encode(items)
+	} else {
+		output.Write(pageHtml)
+		output.WriteString("<main><table>\n")
+		if r.URL.Path != "/" {
+			output.WriteString("<tr><td><a href=\"../\">../</a></td></tr>\n")
 		}
-		// Skip the favicon link on the root page.
-		if link.Target == "favicon.ico" && r.URL.Path == "/" {
-			continue
-		}
-		output.WriteString(fmt.Sprintf("<tr><td><a href=\"%s\">%s</a></td>%s</tr>\n", link.Target, link.Target, link.Extra))
-	}
-	output.WriteString("</table></main>")
+		for i, item := range items {
+			// Split links with and without extra information into separate tables.
+			if i > 0 && items[i-1].Size != nil && item.Size == nil {
+				output.WriteString("</table><table>\n")
+			}
+			// Skip the favicon link on the root page.
+			if item.Name == "favicon.ico" && r.URL.Path == "/" {
+				continue
+			}
 
-	if readmeObject != nil && *readme {
-		output.WriteString("\n<footer>\n")
-		renderReadme(r.Context(), output, readmeObject)
-		output.WriteString("</footer>")
+			var extra = ""
+			if item.Size != nil {
+				extra += fmt.Sprintf("<td>%s</td>", humanize.IBytes(*item.Size))
+			}
+			if item.Updated != nil {
+				extra += fmt.Sprintf(
+					"<td><time title=\"%s\">%s</time></td>",
+					item.Updated.Format(time.DateTime),
+					humanize.Time(*item.Updated),
+				)
+			}
+			if item.Fingerprint != nil {
+				extra += fmt.Sprintf("<td>%s</td>", *item.Fingerprint)
+			}
+
+			fmt.Fprintf(output, "<tr><td><a href=\"%s\">%s</a></td>%s</tr>\n", item.Name, item.Name, extra)
+		}
+		output.WriteString("</table></main>")
+
+		if readmeObject != nil && *readme {
+			output.WriteString("\n<footer>\n")
+			renderReadme(r.Context(), output, readmeObject)
+			output.WriteString("</footer>")
+		}
 	}
 
 	output.Flush()
 }
 
-func linksFromMountPoints(path string) (links []Link) {
+func linksFromMountPoints(path string) (links []Item) {
 	for _, mountPoint := range mountPoints {
 		if mountPoint.Path != path && strings.HasPrefix(mountPoint.Path, path) {
-			links = append(links, Link{strings.SplitAfterN(strings.TrimPrefix(mountPoint.Path, path), "/", 2)[0], ""})
+			links = append(links, Item{Name: strings.SplitAfterN(strings.TrimPrefix(mountPoint.Path, path), "/", 2)[0]})
 		}
 	}
 	return
 }
 
-func linksFromStorage(ctx context.Context, path string) (links []Link, readme *storage.ObjectAttrs) {
+func linksFromStorage(ctx context.Context, path string) (links []Item, readme *storage.ObjectAttrs) {
 	var mountPoint = findMountPoint(path)
 	if mountPoint == nil {
 		return
@@ -116,19 +147,19 @@ func linksFromStorage(ctx context.Context, path string) (links []Link, readme *s
 				}
 			}
 			if attrs.Name != query.Prefix {
-				links = append(links, Link{
-					strings.TrimPrefix(attrs.Name, query.Prefix),
-					fmt.Sprintf(
-						"<td>%s</td><td><time title=\"%s\">%s</time></td><td>%x</td>",
-						humanize.IBytes(uint64(attrs.Size)),
-						attrs.Updated.Format(time.DateTime),
-						humanize.Time(attrs.Updated),
-						attrs.MD5,
-					),
+				var size = uint64(attrs.Size)
+				var md5 = fmt.Sprintf("%x", attrs.MD5)
+				links = append(links, Item{
+					Name:        strings.TrimPrefix(attrs.Name, query.Prefix),
+					Size:        &size,
+					Fingerprint: &md5,
+					ContentType: &attrs.ContentType,
+					Updated:     &attrs.Updated,
+					Metadata:    attrs.Metadata,
 				})
 			}
 		} else if attrs.Prefix != "" {
-			links = append(links, Link{strings.TrimPrefix(attrs.Prefix, query.Prefix), ""})
+			links = append(links, Item{Name: strings.TrimPrefix(attrs.Prefix, query.Prefix)})
 		} else {
 			slog.Warn("unexpected object", "attrs", attrs)
 		}
@@ -136,19 +167,19 @@ func linksFromStorage(ctx context.Context, path string) (links []Link, readme *s
 	return
 }
 
-func sortLinks(a, b Link) int {
-	if aHasExtra, bHasExtra := a.Extra != "", b.Extra != ""; aHasExtra != bHasExtra {
-		if aHasExtra {
+func sortLinks(a, b Item) int {
+	if aHasSize, bHasSize := a.Size != nil, b.Size != nil; aHasSize != bHasSize {
+		if aHasSize {
 			return -1
 		}
 		return 1
 	}
 
 	if *versionSort {
-		va, i := guessVersion(a.Target)
-		vb, j := guessVersion(b.Target)
+		va, i := guessVersion(a.Name)
+		vb, j := guessVersion(b.Name)
 		if va != nil && vb != nil {
-			if cmp := strings.Compare(a.Target[:i], b.Target[:j]); cmp != 0 {
+			if cmp := strings.Compare(a.Name[:i], b.Name[:j]); cmp != 0 {
 				return cmp
 			}
 			if cmp := vb.Compare(va); cmp != 0 {
@@ -157,5 +188,5 @@ func sortLinks(a, b Link) int {
 		}
 	}
 
-	return strings.Compare(a.Target, b.Target)
+	return strings.Compare(a.Name, b.Name)
 }
