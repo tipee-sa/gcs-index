@@ -18,11 +18,11 @@ import (
 )
 
 type Item struct {
-	Name        string            `json:"name"`
+	Name        string            `json:"item"`
 	Size        *uint64           `json:"size,omitempty"`
 	Fingerprint *string           `json:"fingerprint,omitempty"`
 	ContentType *string           `json:"content_type,omitempty"`
-	Updated     *time.Time        `json:"updated,omitempty"`
+	Timestamp   *time.Time        `json:"timestamp,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
@@ -81,11 +81,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			if item.Size != nil {
 				extra += fmt.Sprintf("<td>%s</td>", humanize.IBytes(*item.Size))
 			}
-			if item.Updated != nil {
+			if item.Timestamp != nil {
 				extra += fmt.Sprintf(
 					"<td><time title=\"%s\">%s</time></td>",
-					item.Updated.Format(time.DateTime),
-					humanize.Time(*item.Updated),
+					item.Timestamp.Format(time.DateTime),
+					humanize.Time(*item.Timestamp),
 				)
 			}
 			if item.Fingerprint != nil {
@@ -154,7 +154,7 @@ func linksFromStorage(ctx context.Context, path string) (links []Item, readme *s
 					Size:        &size,
 					Fingerprint: &md5,
 					ContentType: &attrs.ContentType,
-					Updated:     &attrs.Updated,
+					Timestamp:   &attrs.Updated,
 					Metadata:    attrs.Metadata,
 				})
 			}
